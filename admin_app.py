@@ -1,4 +1,17 @@
-import os, time
+import os, json,time
+import streamlit as st
+
+def debug_secrets():
+    st.write("ENV GSERVICE_JSON present:", bool(os.getenv("GSERVICE_JSON")))
+    try:
+        if "GSERVICE_JSON" in st.secrets:
+            st.write("st.secrets['GSERVICE_JSON'] type:", type(st.secrets["GSERVICE_JSON"]))
+        if "gs_service" in st.secrets:
+            st.write("st.secrets['gs_service'] keys:", list(st.secrets["gs_service"].keys()))
+    except Exception as e:
+        st.write("st.secrets read error:", str(e))
+
+debug_secrets()
 import streamlit as st
 import pandas as pd
 from dotenv import load_dotenv
@@ -65,3 +78,4 @@ else:
                     st.experimental_set_query_params(_updated=str(int(time.time())))
                 except Exception:
                     st.info("Please refresh the page to see updates.")
+
