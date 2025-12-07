@@ -1,126 +1,177 @@
+# utils/sheets_helper.py
+"""
+Google Sheets helper (drop-in).
+Reads service-account credentials directly from Streamlit secrets table `[gs_service]`
+(or fallback to GSERVICE_JSON env / st.secrets['GSERVICE_JSON'] / local gservice.json).
+Also reads GSHEET_ID from st.secrets['GSHEET_ID'] or env GSHEET_ID (or gsheet_id.txt fallback).
+
+Public functions:
+- get_gspread_client()
+- sheet_to_df() -> pandas.DataFrame
+- append_submission(row_dict)
+- update_submission_by_id(sub_id, updates)
+
+Expected secrets.toml (example):
+[gs_service]
+type = "service_account"
+project_id = "..."
+private_key_id = "..."
+private_key = """-----BEGIN PRIVATE KEY-----
+...
+-----END PRIVATE KEY-----
+"""
+client_email = "..."
+...
+GSHEET_ID = "sheet-id"
+GEMINI_API_KEY = "..."
+"""
+from typing import Any, Dict, Optional
 import os
 import json
+
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
+    "https://www.googleapis.com/auth/drive",
 ]
 
 
-def _get_from_env(name: str):
-    v = os.environ.get(name)
-    if v:
-        return v
-    return None
-
-
-def _get_from_streamlit_secrets(name: str):
+def _st_secrets_get(key: str) -> Optional[Any]:
     """
-    Returns the secret from streamlit.secrets if available.
-    Note: st.secrets may not be available outside Streamlit runtime.
+    Safe read from streamlit secrets (returns None if streamlit not present or key missing).
     """
     try:
-        import streamlit as _st  # local import to avoid requiring streamlit for non-Streamlit contexts
-        if name in _st.secrets:
-            return _st.secrets[name]
+        import streamlit as st
+        return st.secrets.get(key)
     except Exception:
-        # not running in Streamlit or st.secrets not available
         return None
-    return None
 
 
-def _get_secret_raw(name: str):
+def _env_get(key: str) -> Optional[str]:
+    v = os.environ.get(key)
+    return v if v else None
+
+
+def _normalize_private_key(pk: Optional[str]) -> Optional[str]:
+    if pk is None:
+        return None
+    # If the key contains escaped newlines but not real ones, convert them.
+    if "\\n" in pk and "\n" not in pk:
+        return pk.replace("\\n", "\n")
+    return pk
+
+
+def _load_service_account_info() -> Dict[str, Any]:
     """
-    Try sources in order:
-      1) OS env var
-      2) Streamlit secrets (string or dict)
-      3) Local fallback files (gservice.json or gsheet_id.txt)
-    Returns None if not found.
+    Load service account info in this order:
+      1) st.secrets['gs_service'] (TOML table -> dict)
+      2) st.secrets['GSERVICE_JSON'] (string or dict)
+      3) env GSERVICE_JSON (string)
+      4) local file gservice.json (dev fallback)
+    Returns a dict suitable for Credentials.from_service_account_info(...)
+    Raises RuntimeError if not found or invalid.
     """
-    # 1) OS env
-    v = _get_from_env(name)
-    if v:
-        return v
+    # 1) Streamlit table (preferred)
+    st_sa = _st_secrets_get("gs_service")
+    if isinstance(st_sa, dict):
+        sa = dict(st_sa)  # copy
+        if "private_key" in sa:
+            sa["private_key"] = _normalize_private_key(sa["private_key"])
+        return sa
 
-    # 2) streamlit secrets
-    v = _get_from_streamlit_secrets(name)
-    if v:
-        return v
-
-    # 3) local files (development fallback)
-    if name == "GSERVICE_JSON":
-        maybe = os.path.join(os.getcwd(), "gservice.json")
-        if os.path.exists(maybe):
-            with open(maybe, "r", encoding="utf8") as fh:
-                return fh.read()
-    if name == "GSHEET_ID":
-        maybe = os.path.join(os.getcwd(), "gsheet_id.txt")
-        if os.path.exists(maybe):
-            with open(maybe, "r", encoding="utf8") as fh:
-                return fh.read().strip()
-    return None
-
-
-def _load_service_account_info():
-    """
-    Returns a dict suitable to pass to Credentials.from_service_account_info(...)
-    Accepts:
-      - GSERVICE_JSON as a JSON string (in env or st.secrets)
-      - gs_service table/dict in st.secrets (Streamlit TOML table)
-      - gservice.json file in project root (dev)
-    """
-    # First try Streamlit table form (st.secrets["gs_service"]) which will be a dict
-    try:
-        st_val = _get_from_streamlit_secrets("gs_service")
-        if isinstance(st_val, dict):
-            # ensure private_key has newline characters (Streamlit preserves newlines)
-            return st_val
-    except Exception:
-        pass
-
-    raw = _get_secret_raw("GSERVICE_JSON")
-    if not raw:
-        raise RuntimeError(
-            "Service account JSON not found. Set GSERVICE_JSON in env, st.secrets (minified JSON) "
-            "or provide a [gs_service] table in Streamlit secrets, or put gservice.json in project root."
-        )
-
-    # If it's already a dict (some hosts might return a dict), just return it
-    if isinstance(raw, dict):
-        return raw
-
-    # If it's a string try to parse json
-    if isinstance(raw, str):
-        # Sometimes users paste triple-quoted JSON (with surrounding quotes); try to clean
-        s = raw.strip()
-        # If the string looks like TOML section (starts with '{') we parse as JSON
-        try:
-            return json.loads(s)
-        except Exception:
-            # Try to remove surrounding triple quotes if present
-            cleaned = s.strip()
-            if cleaned.startswith('"""') and cleaned.endswith('"""'):
-                cleaned = cleaned[3:-3].strip()
-            if cleaned.startswith("'\"\"'") and cleaned.endswith("'\"\"'"):
-                cleaned = cleaned[4:-4].strip()
+    # 2) Streamlit GSERVICE_JSON (string or dict)
+    st_json = _st_secrets_get("GSERVICE_JSON")
+    if st_json:
+        if isinstance(st_json, dict):
+            sa = dict(st_json)
+            if "private_key" in sa:
+                sa["private_key"] = _normalize_private_key(sa["private_key"])
+            return sa
+        if isinstance(st_json, str):
+            s = st_json.strip()
+            # strip possible surrounding triple quotes
+            if s.startswith('"""') and s.endswith('"""'):
+                s = s[3:-3].strip()
             try:
-                return json.loads(cleaned)
-            except Exception as e:
-                # Last attempt: if newlines are literal inside, replace literal \n sequences with actual newlines
-                # (this handles cases where private_key was pasted with escaped newlines or with real ones)
+                sa = json.loads(s)
+                if "private_key" in sa:
+                    sa["private_key"] = _normalize_private_key(sa["private_key"])
+                return sa
+            except Exception:
+                # try unicode_escape decode fallback
                 try:
-                    maybe = cleaned.encode('utf-8').decode('unicode_escape')
-                    return json.loads(maybe)
+                    sa = json.loads(s.encode("utf-8").decode("unicode_escape"))
+                    if "private_key" in sa:
+                        sa["private_key"] = _normalize_private_key(sa["private_key"])
+                    return sa
                 except Exception:
-                    raise RuntimeError("Failed to parse GSERVICE_JSON. Ensure it is valid JSON.") from e
+                    raise RuntimeError("st.secrets['GSERVICE_JSON'] present but not valid JSON.")
 
-    raise RuntimeError("Failed to load service account info.")
+    # 3) Environment variable GSERVICE_JSON
+    env_json = _env_get("GSERVICE_JSON")
+    if env_json:
+        s = env_json.strip()
+        if s.startswith('"""') and s.endswith('"""'):
+            s = s[3:-3].strip()
+        try:
+            sa = json.loads(s)
+            if "private_key" in sa:
+                sa["private_key"] = _normalize_private_key(sa["private_key"])
+            return sa
+        except Exception:
+            try:
+                sa = json.loads(s.encode("utf-8").decode("unicode_escape"))
+                if "private_key" in sa:
+                    sa["private_key"] = _normalize_private_key(sa["private_key"])
+                return sa
+            except Exception:
+                raise RuntimeError("GSERVICE_JSON env var present but not valid JSON.")
+
+    # 4) local file fallback
+    if os.path.exists("gservice.json"):
+        try:
+            with open("gservice.json", "r", encoding="utf8") as fh:
+                sa = json.load(fh)
+            if "private_key" in sa:
+                sa["private_key"] = _normalize_private_key(sa["private_key"])
+            return sa
+        except Exception as e:
+            raise RuntimeError(f"Failed to read local gservice.json: {e}")
+
+    raise RuntimeError(
+        "Service account credentials not found. Add st.secrets['gs_service'] or GSERVICE_JSON env or gservice.json file."
+    )
 
 
-def get_gspread_client_from_env():
+def _get_gsheet_id() -> str:
+    # try streamlit secrets first
+    sid = _st_secrets_get("GSHEET_ID")
+    if sid:
+        return str(sid).strip()
+    # common alternate keys in secrets
+    sid = _st_secrets_get("gsheet_id") or _st_secrets_get("gs_sheet_id")
+    if sid:
+        return str(sid).strip()
+    # env fallback
+    sid = _env_get("GSHEET_ID") or _env_get("gsheet_id")
+    if sid:
+        return sid.strip()
+    # local file fallback
+    if os.path.exists("gsheet_id.txt"):
+        with open("gsheet_id.txt", "r", encoding="utf8") as fh:
+            data = fh.read().strip()
+            if data:
+                return data
+    raise RuntimeError("GSHEET_ID not found in st.secrets, environment, or gsheet_id.txt")
+
+
+def get_gspread_client() -> gspread.Client:
+    """
+    Returns an authorized gspread client using credentials from secrets/env/file.
+    """
     sa_info = _load_service_account_info()
     creds = Credentials.from_service_account_info(sa_info, scopes=SCOPES)
     client = gspread.authorize(creds)
@@ -128,58 +179,65 @@ def get_gspread_client_from_env():
 
 
 def _open_sheet():
-    # allow GSHEET_ID from env or streamlit secrets
-    sheet_id_raw = _get_secret_raw("GSHEET_ID")
-    if not sheet_id_raw:
-        # as additional attempt, try streamlit secrets table key "gs_service_sheet_id"
-        try:
-            import streamlit as st
-            if "gs_sheet_id" in st.secrets:
-                sheet_id_raw = st.secrets["gs_sheet_id"]
-        except Exception:
-            pass
-
-    if not sheet_id_raw:
-        raise RuntimeError("GSHEET_ID environment variable not set (or gsheet_id.txt missing).")
-    SHEET_ID = sheet_id_raw.strip()
-    client = get_gspread_client_from_env()
-    sh = client.open_by_key(SHEET_ID)
+    client = get_gspread_client()
+    sheet_id = _get_gsheet_id()
+    sh = client.open_by_key(sheet_id)
     ws = sh.sheet1
     return ws
 
 
-def sheet_to_df():
+def sheet_to_df() -> pd.DataFrame:
+    """
+    Read all records from the sheet and return a pandas DataFrame with expected columns.
+    """
     ws = _open_sheet()
-    rows = ws.get_all_records()
-    if not rows:
-        cols = ["id", "timestamp", "rating", "review", "ai_response", "ai_summary", "ai_actions"]
-        return pd.DataFrame(columns=cols)
-    df = pd.DataFrame(rows)
+    rows = ws.get_all_records()  # list[dict]
     expected = ["id", "timestamp", "rating", "review", "ai_response", "ai_summary", "ai_actions"]
+    if not rows:
+        return pd.DataFrame(columns=expected)
+    df = pd.DataFrame(rows)
+    # ensure expected columns are present
     for c in expected:
         if c not in df.columns:
             df[c] = ""
     return df[expected]
 
 
-def append_submission(row_dict):
+def append_submission(row_dict: Dict[str, Any]) -> bool:
+    """
+    Append a submission row to the sheet. Ensures header exists.
+    row_dict keys: id, timestamp, rating, review, ai_response, ai_summary, ai_actions
+    """
     ws = _open_sheet()
     header = ["id", "timestamp", "rating", "review", "ai_response", "ai_summary", "ai_actions"]
-    existing = ws.row_values(1)
-    if not existing or existing[:len(header)] != header:
-        ws.insert_row(header, 1)
+    try:
+        existing = ws.row_values(1)
+    except Exception:
+        existing = []
+    # if no header or mismatch, write header
+    if not existing or existing[: len(header)] != header:
+        try:
+            # insert header at top (works even if sheet empty)
+            ws.update("A1:G1", [header])
+        except Exception:
+            # fallback to insert_row for older gspread versions
+            ws.insert_row(header, 1)
     row = [row_dict.get(k, "") for k in header]
     ws.append_row(row, value_input_option="USER_ENTERED")
     return True
 
 
-def update_submission_by_id(sub_id, updates: dict):
+def update_submission_by_id(sub_id: str, updates: Dict[str, Any]) -> bool:
+    """
+    Find a row where 'id' matches sub_id and update columns provided in updates dict.
+    Returns True if updated, False if not found.
+    """
     ws = _open_sheet()
     records = ws.get_all_records()
     if not records:
         return False
     header = ws.row_values(1)
-    for idx, rec in enumerate(records, start=2):
+    for idx, rec in enumerate(records, start=2):  # sheet rows start at 1, header is row 1
         if str(rec.get("id")) == str(sub_id):
             for key, val in updates.items():
                 if key in header:
