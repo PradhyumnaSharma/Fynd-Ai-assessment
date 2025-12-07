@@ -1,25 +1,53 @@
-import os, json,time
-import streamlit as st
+import streamlit as st, json, traceback
+from google.oauth2.service_account import Credentials
+import gspread
 
-st.header("DEBUG: GSERVICE secret inspect")
+st.header("DEBUG: gspread/GSheets connectivity test")
 
-if "gs_service" in st.secrets:
-    svc = st.secrets["gs_service"]
-    st.write("gs_service keys:", list(svc.keys()))
-    pk = svc.get("private_key")
-    if pk is None:
-        st.error("private_key missing in gs_service")
+try:
+    # 1) get sa info
+    if "gs_service" in st.secrets:
+        sa_info = dict(st.secrets["gs_service"])
+    elif "GSERVICE_JSON" in st.secrets:
+        raw = st.secrets["GSERVICE_JSON"]
+        sa_info = json.loads(raw) if isinstance(raw, str) else dict(raw)
     else:
-        st.write("private_key length:", len(pk))
-        st.write("private_key contains real newline? ->", "\n" in pk)
-        st.write("private_key contains escaped backslash-n sequence? ->", "\\n" in pk)
-        st.text("private_key repr head (first 200 chars):")
-        st.code(repr(pk[:200]))
-else:
-    st.error("st.secrets['gs_service'] not present")
+        raise RuntimeError("No gs_service or GSERVICE_JSON in st.secrets")
 
+    st.write("Service account keys present:", list(sa_info.keys()))
+    st.write("service_account client_email:", sa_info.get("client_email"))
 
-debug_secrets()
+    # normalize private_key if needed
+    if "private_key" in sa_info and isinstance(sa_info["private_key"], str):
+        if "\\n" in sa_info["private_key"] and "\n" not in sa_info["private_key"]:
+            sa_info["private_key"] = sa_info["private_key"].replace("\\n", "\n")
+
+    # 2) create credentials
+    creds = Credentials.from_service_account_info(sa_info, scopes=[
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ])
+    st.success("Credentials created OK")
+
+    # 3) authorize gspread
+    client = gspread.authorize(creds)
+    st.success("gspread authorized OK")
+
+    # 4) open sheet
+    sheet_id = st.secrets.get("GSHEET_ID") or st.secrets.get("gsheet_id")
+    st.write("Using SHEET_ID:", sheet_id)
+    if not sheet_id:
+        st.error("GSHEET_ID missing in secrets!")
+    else:
+        sh = client.open_by_key(sheet_id)
+        st.success("Spreadsheet opened OK: " + str(sh.title))
+        ws = sh.sheet1
+        rows = ws.get_all_records()
+        st.write("Rows read:", len(rows))
+except Exception as e:
+    st.error("Error: " + str(e))
+    st.text(traceback.format_exc())
+
 import pandas as pd
 from dotenv import load_dotenv
 from utils.gemini_helper import genai_generate_text
@@ -85,5 +113,6 @@ else:
                     st.experimental_set_query_params(_updated=str(int(time.time())))
                 except Exception:
                     st.info("Please refresh the page to see updates.")
+
 
 
