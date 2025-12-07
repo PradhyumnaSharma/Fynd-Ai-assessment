@@ -1,0 +1,13 @@
+.venv/
+venv/
+
+__pycache__/
+*.pyc
+
+gservice.json
+gservice_minified.txt
+gsheet_id.txt
+.env
+.DS_Store
+logs/
+data/*.csv
