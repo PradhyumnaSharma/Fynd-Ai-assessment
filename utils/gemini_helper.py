@@ -1,3 +1,4 @@
+# utils/gemini_helper.py
 import os, logging, traceback, json, time
 from tenacity import retry, wait_exponential, stop_after_attempt
 from google import genai
@@ -80,12 +81,14 @@ def _extract_text_from_response(resp):
 @retry(wait=wait_exponential(multiplier=0.5, min=0.5, max=4), stop=stop_after_attempt(3))
 def genai_generate_text(prompt, temperature=0.0, max_output_tokens=250):
     try:
+        # Call generate_content with minimal, widely-supported args
         resp = CLIENT.models.generate_content(model=MODEL, contents=prompt)
         ok, text, debug = _extract_text_from_response(resp)
         if ok and text:
             return True, text
         else:
             logging.error("genai returned non-text response. debug=%s repr=%s", debug, repr(resp)[:800])
+            # Try alternative client methods if available (use minimal args)
             if hasattr(CLIENT, "generate"):
                 try:
                     alt = CLIENT.generate(model=MODEL, prompt=prompt)
