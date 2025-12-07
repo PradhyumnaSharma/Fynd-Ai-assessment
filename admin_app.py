@@ -1,86 +1,95 @@
-import streamlit as st, json, traceback
-from google.oauth2.service_account import Credentials
-import gspread
+import time
+import os
+import json
+import traceback
 
-# --- BEGIN DEBUG SNIPPET: paste at top of admin_app.py (temporary) ---
-import os, json, traceback
-try:
-    import streamlit as st
-except Exception:
-    st = None
+import streamlit as st
+import pandas as pd
+from dotenv import load_dotenv
 
-def pretty(o):
-    try:
-        return json.dumps(o, indent=2)
-    except Exception:
-        return str(o)
+# --- debug / diagnostics (visible on the Streamlit page) ---
+st.set_page_config(page_title="Fynd AI — Admin", layout="wide")
+st.title("Admin Dashboard — Submissions (Debug Mode)")
 
-print("\n--- ADMIN DEBUG START ---\n")
+st.markdown("### Debug: environment & secrets")
+col1, col2 = st.columns(2)
 
-# 1) Show if streamlit context exists
-print("streamlit available:", bool(st))
+with col1:
+    st.write("**Environment variables (presence & head)**")
+    for k in ("GSHEET_ID", "GSERVICE_JSON", "GEMINI_API_KEY"):
+        v = os.environ.get(k, "")
+        st.write(f"- {k}: present={bool(v)} head={repr(v[:120])}")
 
-# 2) Print env variables that matter
-for k in ("GSHEET_ID","GSERVICE_JSON","GEMINI_API_KEY"):
-    print(f"ENV {k}:", bool(os.environ.get(k)), "value head:", repr((os.environ.get(k) or "")[:120]))
-
-# 3) If streamlit exists, print secrets keys / presence
-if st:
+with col2:
+    st.write("**Streamlit secrets keys**")
     try:
         keys = list(st.secrets.keys())
     except Exception as e:
         keys = f"st.secrets read error: {e}"
-    print("st.secrets keys:", keys)
-    # show gs_service content summary
-    if "gs_service" in getattr(st, "secrets", {}):
-        svc = st.secrets["gs_service"]
-        print("st.secrets['gs_service'] keys:", list(svc.keys()))
+    st.write(keys)
+
+st.write("**gs_service summary (if present)**")
+if "gs_service" in getattr(st, "secrets", {}):
+    svc = st.secrets["gs_service"]
+    try:
+        st.write("keys:", list(svc.keys()))
         pk = svc.get("private_key")
-        print("private_key length:", len(pk) if pk else None)
-        print("private_key contains real newline?:", ("\n" in pk) if pk else None)
-    else:
-        print("st.secrets['gs_service'] MISSING")
+        st.write("private_key length:", len(pk) if pk else None)
+        st.write("private_key contains real newline?:", ("\n" in pk) if pk else None)
+    except Exception as e:
+        st.write("error inspecting gs_service:", e)
+else:
+    st.write("st.secrets['gs_service'] MISSING")
 
-# 4) See if local gservice.json or .streamlit/secrets.toml exist
-print("local gservice.json exists:", os.path.exists("gservice.json"))
-print(".streamlit/secrets.toml exists:", os.path.exists(".streamlit/secrets.toml"))
+st.write("**Local files**")
+st.write("gservice.json exists:", os.path.exists("gservice.json"))
+st.write(".streamlit/secrets.toml exists:", os.path.exists(".streamlit/secrets.toml"))
 
-# 5) Try to import and call loader from utils.sheets_helper and show exception if any
+# Try to run loader functions from utils.sheets_helper and show results
+from utils import sheets_helper as sheets_helper_mod  # import module to call internals
 try:
-    from utils.sheets_helper import _load_service_account_info, _get_gsheet_id
-    try:
-        info = _load_service_account_info()
-        print("loader: found sa_info keys:", list(info.keys()))
-    except Exception as e:
-        print("loader error:", repr(e))
-        print(traceback.format_exc())
-    try:
-        sid = _get_gsheet_id()
-        print("loader: GSHEET_ID resolved ->", sid)
-    except Exception as e:
-        print("loader GSHEET_ID error:", repr(e))
-        print(traceback.format_exc())
+    sa_info = sheets_helper_mod._load_service_account_info()
+    st.success("Loader: loaded service account info keys: " + ", ".join(list(sa_info.keys())))
 except Exception as e:
-    print("Could not import utils.sheets_helper:", repr(e))
-    print(traceback.format_exc())
+    st.error("Loader: failed to load service account info: " + str(e))
+    st.text(traceback.format_exc())
 
-print("\n--- ADMIN DEBUG END ---\n")
-# --- END DEBUG SNIPPET ---
+try:
+    sid = sheets_helper_mod._get_gsheet_id()
+    st.success("Loader: GSHEET_ID resolved -> " + str(sid))
+except Exception as e:
+    st.error("Loader: failed to resolve GSHEET_ID: " + str(e))
+    st.text(traceback.format_exc())
 
-import pandas as pd
-from dotenv import load_dotenv
+st.markdown("---")
+
+# --- end debug / diagnostics ---
+
+# Application imports that rely on sheets/gemini
 from utils.gemini_helper import genai_generate_text
 from utils.sheets_helper import sheet_to_df, update_submission_by_id
-load_dotenv()
 
-st.set_page_config(page_title="Fynd AI — Admin", layout="wide")
+load_dotenv()  # keep for local dev convenience
+
 st.title("Admin Dashboard — Submissions")
 
+# Load submissions with graceful fallback
 try:
     df = sheet_to_df()
+    st.success(f"Loaded submissions from Google Sheets (rows={len(df)})")
 except Exception as e:
     st.error("Failed to read data from Google Sheets: " + str(e))
-    df = pd.DataFrame(columns=["id","timestamp","rating","review","ai_response","ai_summary","ai_actions"])
+    st.text(traceback.format_exc())
+    # fallback to local backup CSV if available
+    backup_path = "data/submissions_backup.csv"
+    if os.path.exists(backup_path):
+        try:
+            df = pd.read_csv(backup_path)
+            st.info(f"Loaded submissions from local backup ({backup_path}). Rows: {len(df)}")
+        except Exception:
+            df = pd.DataFrame(columns=["id","timestamp","rating","review","ai_response","ai_summary","ai_actions"])
+    else:
+        df = pd.DataFrame(columns=["id","timestamp","rating","review","ai_response","ai_summary","ai_actions"])
 
 st.markdown(f"**Total submissions:** {len(df)} — **Avg rating:** {df['rating'].mean() if len(df)>0 else 'N/A'}")
 
@@ -132,7 +141,3 @@ else:
                     st.experimental_set_query_params(_updated=str(int(time.time())))
                 except Exception:
                     st.info("Please refresh the page to see updates.")
-
-
-
-
