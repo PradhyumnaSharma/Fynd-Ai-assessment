@@ -4,8 +4,13 @@ import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 from utils.gemini_helper import genai_generate_text
-from utils.sheets_helper import sheet_to_df, append_submission
+
 load_dotenv()
+
+DATA_FILE = "data/submissions.csv"
+os.makedirs("data", exist_ok=True)
+if not os.path.exists(DATA_FILE):
+    pd.DataFrame(columns=["id","timestamp","rating","review","ai_response","ai_summary","ai_actions"]).to_csv(DATA_FILE, index=False)
 
 st.set_page_config(page_title="Fynd AI — User", layout="wide")
 st.title("User Dashboard — Submit a Review")
@@ -55,19 +60,9 @@ if submitted:
             "ai_actions": ai_actions
         }
 
-        try:
-            append_submission(row)
-        except Exception as e:
-            st.error("Failed to save submission to Google Sheets: " + str(e))
-            # fallback: keep local copy
-            os.makedirs("data", exist_ok=True)
-            local_file = "data/submissions_backup.csv"
-            df_local = pd.DataFrame([row])
-            if os.path.exists(local_file):
-                df_local = pd.concat([pd.read_csv(local_file), df_local], ignore_index=True)
-            df_local.to_csv(local_file, index=False)
-            st.info("Saved to local backup: " + local_file)
-            st.stop()
+        df = pd.read_csv(DATA_FILE)
+        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+        df.to_csv(DATA_FILE, index=False)
 
         st.success("Submitted — AI reply shown below.")
         st.write(ai_response)
