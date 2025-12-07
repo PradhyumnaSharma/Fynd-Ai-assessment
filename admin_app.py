@@ -1,15 +1,23 @@
 import os, json,time
 import streamlit as st
 
-def debug_secrets():
-    st.write("ENV GSERVICE_JSON present:", bool(os.getenv("GSERVICE_JSON")))
-    try:
-        if "GSERVICE_JSON" in st.secrets:
-            st.write("st.secrets['GSERVICE_JSON'] type:", type(st.secrets["GSERVICE_JSON"]))
-        if "gs_service" in st.secrets:
-            st.write("st.secrets['gs_service'] keys:", list(st.secrets["gs_service"].keys()))
-    except Exception as e:
-        st.write("st.secrets read error:", str(e))
+st.header("DEBUG: GSERVICE secret inspect")
+
+if "gs_service" in st.secrets:
+    svc = st.secrets["gs_service"]
+    st.write("gs_service keys:", list(svc.keys()))
+    pk = svc.get("private_key")
+    if pk is None:
+        st.error("private_key missing in gs_service")
+    else:
+        st.write("private_key length:", len(pk))
+        st.write("private_key contains real newline? ->", "\n" in pk)
+        st.write("private_key contains escaped backslash-n sequence? ->", "\\n" in pk)
+        st.text("private_key repr head (first 200 chars):")
+        st.code(repr(pk[:200]))
+else:
+    st.error("st.secrets['gs_service'] not present")
+
 
 debug_secrets()
 import streamlit as st
@@ -78,4 +86,5 @@ else:
                     st.experimental_set_query_params(_updated=str(int(time.time())))
                 except Exception:
                     st.info("Please refresh the page to see updates.")
+
 
