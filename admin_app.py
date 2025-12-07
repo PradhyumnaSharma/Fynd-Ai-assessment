@@ -2,51 +2,70 @@ import streamlit as st, json, traceback
 from google.oauth2.service_account import Credentials
 import gspread
 
-st.header("DEBUG: gspread/GSheets connectivity test")
-
+# --- BEGIN DEBUG SNIPPET: paste at top of admin_app.py (temporary) ---
+import os, json, traceback
 try:
-    # 1) get sa info
-    if "gs_service" in st.secrets:
-        sa_info = dict(st.secrets["gs_service"])
-    elif "GSERVICE_JSON" in st.secrets:
-        raw = st.secrets["GSERVICE_JSON"]
-        sa_info = json.loads(raw) if isinstance(raw, str) else dict(raw)
+    import streamlit as st
+except Exception:
+    st = None
+
+def pretty(o):
+    try:
+        return json.dumps(o, indent=2)
+    except Exception:
+        return str(o)
+
+print("\n--- ADMIN DEBUG START ---\n")
+
+# 1) Show if streamlit context exists
+print("streamlit available:", bool(st))
+
+# 2) Print env variables that matter
+for k in ("GSHEET_ID","GSERVICE_JSON","GEMINI_API_KEY"):
+    print(f"ENV {k}:", bool(os.environ.get(k)), "value head:", repr((os.environ.get(k) or "")[:120]))
+
+# 3) If streamlit exists, print secrets keys / presence
+if st:
+    try:
+        keys = list(st.secrets.keys())
+    except Exception as e:
+        keys = f"st.secrets read error: {e}"
+    print("st.secrets keys:", keys)
+    # show gs_service content summary
+    if "gs_service" in getattr(st, "secrets", {}):
+        svc = st.secrets["gs_service"]
+        print("st.secrets['gs_service'] keys:", list(svc.keys()))
+        pk = svc.get("private_key")
+        print("private_key length:", len(pk) if pk else None)
+        print("private_key contains real newline?:", ("\n" in pk) if pk else None)
     else:
-        raise RuntimeError("No gs_service or GSERVICE_JSON in st.secrets")
+        print("st.secrets['gs_service'] MISSING")
 
-    st.write("Service account keys present:", list(sa_info.keys()))
-    st.write("service_account client_email:", sa_info.get("client_email"))
+# 4) See if local gservice.json or .streamlit/secrets.toml exist
+print("local gservice.json exists:", os.path.exists("gservice.json"))
+print(".streamlit/secrets.toml exists:", os.path.exists(".streamlit/secrets.toml"))
 
-    # normalize private_key if needed
-    if "private_key" in sa_info and isinstance(sa_info["private_key"], str):
-        if "\\n" in sa_info["private_key"] and "\n" not in sa_info["private_key"]:
-            sa_info["private_key"] = sa_info["private_key"].replace("\\n", "\n")
-
-    # 2) create credentials
-    creds = Credentials.from_service_account_info(sa_info, scopes=[
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
-    ])
-    st.success("Credentials created OK")
-
-    # 3) authorize gspread
-    client = gspread.authorize(creds)
-    st.success("gspread authorized OK")
-
-    # 4) open sheet
-    sheet_id = st.secrets.get("GSHEET_ID") or st.secrets.get("gsheet_id")
-    st.write("Using SHEET_ID:", sheet_id)
-    if not sheet_id:
-        st.error("GSHEET_ID missing in secrets!")
-    else:
-        sh = client.open_by_key(sheet_id)
-        st.success("Spreadsheet opened OK: " + str(sh.title))
-        ws = sh.sheet1
-        rows = ws.get_all_records()
-        st.write("Rows read:", len(rows))
+# 5) Try to import and call loader from utils.sheets_helper and show exception if any
+try:
+    from utils.sheets_helper import _load_service_account_info, _get_gsheet_id
+    try:
+        info = _load_service_account_info()
+        print("loader: found sa_info keys:", list(info.keys()))
+    except Exception as e:
+        print("loader error:", repr(e))
+        print(traceback.format_exc())
+    try:
+        sid = _get_gsheet_id()
+        print("loader: GSHEET_ID resolved ->", sid)
+    except Exception as e:
+        print("loader GSHEET_ID error:", repr(e))
+        print(traceback.format_exc())
 except Exception as e:
-    st.error("Error: " + str(e))
-    st.text(traceback.format_exc())
+    print("Could not import utils.sheets_helper:", repr(e))
+    print(traceback.format_exc())
+
+print("\n--- ADMIN DEBUG END ---\n")
+# --- END DEBUG SNIPPET ---
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -113,6 +132,7 @@ else:
                     st.experimental_set_query_params(_updated=str(int(time.time())))
                 except Exception:
                     st.info("Please refresh the page to see updates.")
+
 
 
 
