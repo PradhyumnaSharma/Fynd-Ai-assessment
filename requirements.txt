@@ -1,0 +1,7 @@
+streamlit
+pandas
+google-genai
+python-dotenv
+tenacity
+gspread
+google-auth
